@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <script src="https://d3js.org/topojson.v3.min.js"></script>
+  <style>
+    .not-filled {
+      fill: none !important;
+    }
+
+    .is-hidden {
+      visibility: hidden;
+    }
+
+    .viz {
+      display: flex;
+      flex-direction: column;
+      justify-items: center;
+      align-items: center;
+    }
+
+    .button-group {
+      display: flex;
+      flex-direction: row;
+      justify-content: space-around;
+    }
+
+    .button-group button {
+      border: none;
+    }
+
+    .state,
+    .county {
+      fill: lightgrey;
+      stroke: none;
+    }
+
+    .state-boundary {
+      fill: none;
+      stroke: darkgrey;
+      stroke-width: 2px;
+    }
+
+    .county-boundary {
+      fill: none;
+      stroke: darkgrey;
+      stroke-width: 1px;
+    }
+  </style>
+  <title>Project 2</title>
+</head>
+
+<body>
+  <div class="viz">
+    <div class="slider">
+      <button id="animate">Play</button>
+      <input type="range" name="month" id="month" min="0" max="20" value="0" step="1" />
+    </div>
+    <div class="button-group">
+      <button id="stateView">State View</button>
+      <button id="countyView">County View</button>
+    </div>
+    <svg id="map" width="975" height="610"></svg>
+  </div>
+  <script>
+    const totalState = "./datasets/processed_states.csv";
+    const totalCounties = "./datasets/processed_counties.csv";
+    const monthlyState = "./datasets/processed_states.json";
+    const monthlyCounties = "./datasets/processed_counties.json";
+
+    // Map Related
+    const map = d3.select("svg#map");
+    const mapWidth = map.attr("width");
+    const mapHeight = map.attr("height");
+    const margins = { top: 10, right: 10, bottom: 20, left: 20 };
+
+    // Slider
+    const slider = d3.select("input#month");
+
+    // Buttons Related
+    const animateBtn = d3.select("button#animate");
+    const stateViewBtn = d3.select("button#stateView");
+    const countyViewBtn = d3.select("button#countyView");
+
+    const makeMaps = async () => {
+      let id;
+      let isAnimate = false;
+      let showState = true;
+
+      // Loading Map Data
+      const us = await d3.json("./datasets/counties-10m.json", d3.autoType);
+      const states = topojson.feature(us, us.objects.states);
+      const statesMesh = topojson.mesh(us, us.objects.states);
+      const counties = topojson.feature(us, us.objects.counties);
+      const countiesMesh = topojson.mesh(us, us.objects.counties);
+      const statesFips = d3.map(states.features, ({ id }) => id);
+      const countiesFips = d3.map(counties.features, ({ id }) => id);
+
+      // Projection
+      const projection = d3.geoAlbersUsa()
+        .fitSize([mapWidth, mapHeight], states);
+      const path = d3.geoPath(projection);
+      // Buttons
+      function showStateView(e) {
+        e.stopPropagation();
+
+
+        map.selectAll("path.state")
+          .classed("not-filled", false);
+        map.selectAll("path.county")
+          .classed("not-filled", true);
+        map.select("path.county-boundary")
+          .classed("is-hidden", true)
+          .lower();
+
+        showState = true;
+        updateMap(month);
+
+      };
+
+      function showCountyView(e) {
+        e.stopPropagation();
+
+
+        map.selectAll("path.state")
+          .classed("not-filled", true);
+        map.selectAll("path.county")
+          .classed("not-filled", false);
+        map.select("path.county-boundary")
+          .classed("is-hidden", false)
+          .raise();
+
+        showState = false;
+        updateMap(month);
+
+      };
+
+
+      // COVID Data
+      const statesCovid = await d3.json(monthlyState, d3.autoType);
+      const countiesCovid = await d3.json(monthlyCounties, d3.autoType);
+      let statesMap = {};
+      let countiesMap = {};
+
+      for (let i = 0; i <= 20; i++) {
+        statesMap[i] = {};
+        countiesMap[i] = {};
+      }
+
+      for (let i = 0; i <= 20; i++) {
+        statesCovid[i].forEach(d => {
+          statesMap[i][d.fips] = d;
+        });
+        countiesCovid[i].forEach(d => {
+          countiesMap[i][d.fips] = d;
+        });
+      }
+
+      const statesCovidTotal = await d3.csv("./datasets/processed_states.csv", d3.autoType);
+      const countiesCovidTotal = await d3.csv("./datasets/processed_counties.csv", d3.autoType);
+      const statesCases = d3.map(statesCovidTotal, ({ cases }) => cases);
+      const countiesCases = d3.map(countiesCovidTotal, ({ cases }) => cases);
+
+      // Scales
+      const statesScale = d3.scaleQuantile()
+        .domain(statesCases)
+        .range(d3.schemeBlues[9]);
+      const countiesScale = d3.scaleQuantile()
+        .domain(countiesCases)
+        .range(d3.schemeBlues[9]);
+
+      map.append("path")
+        .datum(countiesMesh)
+        .attr("class", "county-boundary")
+        .attr("d", path)
+        .classed("is-hidden", () => showState);
+      map.append("path")
+        .datum(statesMesh)
+        .attr("class", "state-boundary")
+        .attr("d", path)
+        .classed("is-hidden", () => !showState);
+
+      // County
+      for (let i = 0; i <= 20; i++) {
+        let g = map.append("g")
+          .attr("class", `m${i}`);
+
+        g.selectAll("path.county")
+          .data(counties.features)
+          .join("path")
+          .attr("class", "county")
+          .attr("id", ({ id }) => id)
+          .attr("d", path)
+          .style("fill", ({ id }) => countiesMap[i][id] !== undefined ? countiesScale(countiesMap[i][id]["cases"]) : "lightgrey")
+          .classed("is-hidden", true);
+
+
+        // State
+        g.selectAll("path.state")
+          .data(states.features)
+          .join("path")
+          .attr("class", "state")
+          .attr("id", ({ id }) => id)
+          .attr("d", path)
+          .style("fill", ({ id }) => statesMap[i][id] !== undefined ? statesScale(statesMap[i][id]["cases"]) : "lightgrey")
+          .classed("is-hidden", true);
+
+      }
+
+      function updateMap(month) {
+        map.selectAll(`path.county`)
+          .classed("is-hidden", true);
+        map.append("path")
+          .datum(countiesMesh)
+          .attr("class", "county-boundary")
+          .attr("d", path)
+          .classed("is-hidden", true);
+
+        // State
+        map.selectAll(`path.state`)
+          .classed("is-hidden", true);
+        map.append("path")
+          .datum(statesMesh)
+          .attr("class", "state-boundary")
+          .attr("d", path)
+          .classed("is-hidden", true);
+
+        map.selectAll(`g.m${month} path.county`)
+          .classed("is-hidden", () => showState);
+        map.append("path")
+          .datum(countiesMesh)
+          .attr("class", "county-boundary")
+          .attr("d", path)
+          .classed("is-hidden", () => showState);
+
+        // State
+        map.selectAll(`g.m${month} path.state`)
+          .classed("is-hidden", () => !showState);
+        map.append("path")
+          .datum(statesMesh)
+          .attr("class", "state-boundary")
+          .attr("d", path)
+          .classed("is-hidden", () => !showState);
+      }
+
+      function animate(e) {
+        e.stopPropagation();
+
+        if (isAnimate) {
+          window.cancelAnimationFrame(id);
+          isAnimate = false;
+        } else {
+
+          function play() {
+            let animateMonth = parseInt(slider.property("value"));
+
+            if (animateMonth > 20) {
+              window.cancelAnimationFrame(id);
+              id = undefined;
+            } else {
+              updateMap(animateMonth);
+
+              slider.attr("value", animateMonth + 1)
+
+              id = window.requestAnimationFrame(play);
+            }
+          }
+
+          window.cancelAnimationFrame(id);
+
+          id = window.requestAnimationFrame(play);
+          isAnimate = true;
+        }
+      };
+
+      animateBtn.on("click", animate);
+      stateViewBtn.on("click", showStateView);
+      countyViewBtn.on("click", showCountyView);
+
+      slider.on("input", () => updateMap(slider.property("value")));
+
+      updateMap(slider.attr("value"));
+    };
+
+    makeMaps();
+  </script>
+</body>
+
+</html>

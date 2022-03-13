@@ -1,0 +1,680 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <script src="https://d3js.org/topojson.v3.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/d3-legend/2.13.0/d3-legend.js"></script>
+  <style>
+    .not-filled {
+      fill: none !important;
+    }
+
+    .is-hidden {
+      visibility: hidden;
+    }
+
+    .viz {
+      display: flex;
+      flex-direction: column;
+      justify-items: center;
+      align-items: center;
+    }
+
+    .button-group {
+      display: flex;
+      flex-direction: row;
+      justify-content: space-around;
+      margin: 0.5rem;
+    }
+
+    .slider-group {
+      display: flex;
+      flex-direction: row;
+      justify-content: space-around;
+      margin: 0.5rem;
+    }
+
+    .slider-group * {
+      margin: 0 1rem;
+    }
+
+    .button-group button {
+      border: none;
+    }
+
+    .state,
+    .county {
+      fill: lightgrey;
+      stroke: none;
+    }
+
+    .state-boundary {
+      fill: none;
+      stroke: darkgrey;
+      stroke-width: 2px;
+    }
+
+    .county-boundary {
+      fill: none;
+      stroke: darkgrey;
+      stroke-width: 1px;
+    }
+  </style>
+  <title>Project 2</title>
+</head>
+
+<body>
+  <div class="viz">
+    <h1>Modeling the Impact of COVID-19 (by Geographic Area) from March 2020 to November 2021</h1>
+    <div class="dropdown-group">
+      <select name="dataGenre" id="dataGenre">
+        <option>Cases</option>
+        <option>Deaths</option>
+        <option>Vaccinations</option>
+      </select>
+    </div>
+    <div class="slider-group">
+      <button id="animate">Play</button>
+      <input type="range" name="month" id="month" min="0" max="20" value="0" step="1" />
+    </div>
+    <div class="button-group">
+      <button id="stateView">State View</button>
+      <button id="countyView">County View</button>
+    </div>
+    <svg id="colorLegend" height="120" width="500" style="background: #fff; margin-top:30px"></svg>
+    <!-- <svg id="legend" width="1000" height="100" style="margin-left: 75; margin-top: 50;"></svg> -->
+    <svg id="map" width="975" height="610"></svg>
+    <svg id="graph" width="600" height="300"></svg>
+  </div>
+  <script>
+    // From Class Notes
+    function drawLegend(legend, legendColorScale) {
+      // Bonus code here to draw an adaptive gradient legend so we can see different color scales for choropleth maps
+      //  Credit Prof. Rz if you are basing a legend on this structure, and note SERIOUS PERFORMANCE CONSIDERATIONS
+
+      //const legend = d3.select("#colorLegend");
+      const legendWidth = legend.attr("width");
+      const legendHeight = legend.attr("height");
+      const legendMinMax = d3.extent(legendColorScale.domain()); // way to recover the minMax from most kinds of scales
+      const barHeight = 20;
+      const stepSize = 4; // warning, not using a canvas element so lots of rect tags will be created for low stepSize, causing issues with performance
+      // Extend the minmax by 1 in either direction to expose more features
+      const pixelScale = d3.scaleLinear()
+        .domain([0, legendWidth - 40])
+        .range([legendMinMax[0] - 1, legendMinMax[1] + 1]); // In this case the "data" are pixels, and we get numbers to use in colorScale
+      const barScale = d3.scaleLinear()
+        .domain([legendMinMax[0] - 1, legendMinMax[1] + 1])
+        .range([0, legendWidth - 40]);
+      const barAxis = d3.axisBottom(barScale);
+      // Check if we're using a quantile scale - if so, we can do better
+      if (legendColorScale.hasOwnProperty('quantiles')) {
+        // Use the quantile breakpoints plus the min and max of the scale as tick values
+        barAxis.tickValues(legendColorScale.quantiles().concat(legendMinMax));
+      }
+      legend.append("g")
+        .attr("class", "colorbar axis")
+        .attr("transform", "translate(" + (20) + "," + (barHeight + 5) + ")")
+        .call(barAxis)
+        .selectAll("text")
+        .style("text-anchor", "end")
+        .attr("dx", "-.8em")
+        .attr("dy", ".15em")
+        .attr("transform", "rotate(-75)");
+      // Draw rects of color down the bar
+      let bar = legend.append("g")
+        .attr("transform", "translate(" + (20) + "," + (0) + ")")
+      for (let i = 0; i < legendWidth - 40; i = i + stepSize) {
+        bar.append("rect")
+          .attr("x", i)
+          .attr("y", 0)
+          .attr("width", stepSize)
+          .attr("height", barHeight)
+          .style("fill", legendColorScale(pixelScale(i))); // pixels => countData => color
+      }
+      // Put lines in to mark actual min and max of our data
+      bar.append("line")
+        .attr("stroke", "white")
+        .attr("stroke-width", 3)
+        .attr("x1", barScale(legendMinMax[0]))
+        .attr("x2", barScale(legendMinMax[0]))
+        .attr("y1", 0)
+        .attr("y1", barHeight + 4);
+
+      bar.append("line")
+        .attr("stroke", "white")
+        .attr("stroke-width", 3)
+        .attr("x1", barScale(legendMinMax[1]))
+        .attr("x2", barScale(legendMinMax[1]))
+        .attr("y1", 0)
+        .attr("y1", barHeight + 4);
+    }
+
+    const totalNational = "./datasets/processed_us.csv";
+    const totalStates = "./datasets/processed_states.csv";
+    const totalCounties = "./datasets/processed_counties.csv";
+    const monthlyNational = "./datasets/processed_us.json";
+    const monthlyStates = "./datasets/processed_states.json";
+    const monthlyCounties = "./datasets/processed_counties.json";
+    const map = d3.select("svg#map");
+    const graph = d3.select("svg#graph");
+    const mapWidth = map.attr("width");
+    const mapHeight = map.attr("height");
+    const graphWidth = graph.attr("width");
+    const graphHeight = graph.attr("height");
+    const margins = { top: 10, right: 10, bottom: 60, left: 85 };
+    const slider = d3.select("input#month");
+    const selector = d3.select("select#dataGenre");
+    const animateBtn = d3.select("button#animate");
+    const stateViewBtn = d3.select("button#stateView");
+    const countyViewBtn = d3.select("button#countyView");
+    const localGraph = d3.select("svg#localGraph");
+    const months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+
+    const makeMaps = async () => {
+      let focusedArea;
+      let timer;
+      let previousElapsed = 0;
+      let isAnimating = false;
+      let isAnimate = false;
+      let showState = true;
+
+      const frameDuration = 250;
+      const us = await d3.json("./datasets/counties-10m.json", d3.autoType);
+      const states = topojson.feature(us, us.objects.states);
+      const statesMesh = topojson.mesh(us, us.objects.states);
+      const counties = topojson.feature(us, us.objects.counties);
+      const countiesMesh = topojson.mesh(us, us.objects.counties);
+      const statesFips = d3.map(states.features, ({ id }) => id);
+      const countiesFips = d3.map(counties.features, ({ id }) => id);
+      const projection = d3.geoAlbersUsa()
+        .fitSize([mapWidth, mapHeight], states);
+      const path = d3.geoPath(projection);
+
+      function showStateView(e) {
+        e.stopPropagation();
+        resetBarGraph();
+
+        map.selectAll("path.state")
+          .classed("not-filled", false);
+        map.selectAll("path.county")
+          .classed("not-filled", true);
+        map.select("path.county-boundary")
+          .classed("is-hidden", true)
+          .lower();
+
+        showState = true;
+
+        updateMapTransition(slider.property("value"));
+      };
+
+      function showCountyView(e) {
+        e.stopPropagation();
+        resetBarGraph();
+
+        map.selectAll("path.state")
+          .classed("not-filled", true);
+        map.selectAll("path.county")
+          .classed("not-filled", false);
+        map.select("path.county-boundary")
+          .classed("is-hidden", false)
+          .raise();
+
+        showState = false;
+
+        updateMapTransition(slider.property("value"));
+      };
+
+      const statesCovid = await d3.json(monthlyStates, d3.autoType);
+      const countiesCovid = await d3.json(monthlyCounties, d3.autoType);
+      const nationalCovidTotal = await d3.csv(totalNational, d3.autoType);
+      const statesCovidTotal = await d3.csv(totalStates, d3.autoType);
+      const countiesCovidTotal = await d3.csv(totalCounties, d3.autoType);
+      const nationalCases = d3.map(nationalCovidTotal, ({ cases }) => cases);
+      const statesCases = d3.map(statesCovidTotal, ({ cases }) => cases);
+      const countiesCases = d3.map(countiesCovidTotal, ({ cases }) => cases);
+      const nationalDeaths = d3.map(nationalCovidTotal, ({ deaths }) => deaths);
+      const statesDeaths = d3.map(statesCovidTotal, ({ deaths }) => deaths);
+      const countiesDeaths = d3.map(countiesCovidTotal, ({ deaths }) => deaths);
+      const nationalVaccinations = d3.map(nationalCovidTotal, ({ series_complete_pop_pct }) => series_complete_pop_pct);
+      const statesVaccinations = d3.map(statesCovidTotal, ({ series_complete_pop_pct }) => series_complete_pop_pct);
+      const countiesVaccinations = d3.map(countiesCovidTotal, ({ series_complete_pop_pct }) => series_complete_pop_pct);
+      const statesCasesScale = d3.scaleQuantile()
+        .domain(statesCases)
+        .range(d3.schemeBlues[9]);
+      const countiesCasesScale = d3.scaleQuantile()
+        .domain(countiesCases)
+        .range(d3.schemeBlues[9]);
+      const statesDeathsScale = d3.scaleQuantile()
+        .domain(statesDeaths)
+        .range(d3.schemeReds[9]);
+      const countiesDeathsScale = d3.scaleQuantile()
+        .domain(countiesDeaths)
+        .range(d3.schemeReds[9]);
+      const statesVaccinationScale = d3.scaleQuantile()
+        .domain(statesVaccinations)
+        .range(d3.schemeGreens[9]);
+      const countiesVaccinationScale = d3.scaleQuantile()
+        .domain(countiesVaccinations)
+        .range(d3.schemeGreens[9]);
+      const timeScale = d3.scaleBand()
+        .domain(Array.from(Array(nationalCovidTotal.length).keys()))
+        .range([margins.left, graphWidth - margins.right]);
+      const yScale = (extent) => d3.scaleLinear()
+        .domain([0, extent[extent.length - 1]])
+        .range([graphHeight - margins.bottom, margins.bottom]);
+      const leftAxis = (scale) => d3.axisLeft(scale)
+        .tickSizeOuter(0);
+      const bottomAxis = d3.axisBottom(timeScale)
+        .tickSizeOuter(0)
+        .tickFormat(d => {
+          let month = parseInt(d);
+          let year = d > 9 ? "21" : "20";
+
+          return months[(d + 2) % months.length].substring(0, 3) + " " + year;
+        });
+
+      let statesScale = statesCasesScale;
+      let countiesScale = countiesCasesScale;
+      let currentYScale = yScale(nationalCases);
+      let currentLeftAxis = leftAxis(currentYScale);
+      let dataNationalAttr = "cases";
+      let dataStatesAttr = "cases";
+      let dataCountiesAttr = "cases";
+      let leftAxisLabel = "Total Cases";
+
+      map.selectAll("path.county")
+        .data(counties.features)
+        .join("path")
+        .attr("class", "county")
+        .attr("id", ({ id }) => id)
+        .attr("d", path)
+        .style("fill", ({ id }) => countiesCovid[slider.property("value")][id] !== undefined ? countiesCasesScale(countiesCovid[slider.property("value")][id]["cases"]) : "lightgrey")
+        .classed("is-hidden", () => showState)
+        .on("click", click);
+      map.selectAll("path.state")
+        .data(states.features)
+        .join("path")
+        .attr("class", "state")
+        .attr("id", ({ id }) => id)
+        .attr("d", path)
+        .style("fill", ({ id }) => statesCovid[slider.property("value")][id] !== undefined ? statesCasesScale(statesCovid[slider.property("value")][id]["cases"]) : "lightgrey")
+        .classed("is-hidden", () => !showState)
+        .on("click", click);
+      map.append("path")
+        .datum(countiesMesh)
+        .attr("class", "county-boundary")
+        .attr("d", path);
+      map.append("path")
+        .datum(statesMesh)
+        .attr("class", "state-boundary")
+        .attr("d", path)
+        .raise();
+      graph.append("g")
+        .attr("class", "xAxis")
+        .attr("transform", `translate(0, ${graphHeight - margins.bottom})`)
+        .call(bottomAxis)
+        .selectAll("text")
+        .style("text-anchor", "end")
+        .attr("dx", "-.8em")
+        .attr("dy", ".15em")
+        .attr("transform", "rotate(-65)");
+      graph.append("g")
+        .attr("class", "yAxis")
+        .attr("transform", `translate(${margins.left}, 0)`)
+        .call(currentLeftAxis);
+      graph.append("text")
+        .text(leftAxisLabel)
+        .attr("class", "yAxisLabel")
+        .attr("transform", "rotate(-90)")
+        // .attr("transform", "translate(20, 0)")
+        .attr("alignment-baseline", "middle")
+        .attr("x", -graphHeight / 2 - 3 * margins.top)
+        .attr("y", margins.left / 4);
+      graph.append("text")
+        .text("Month")
+        .attr("class", "xAxisLabel")
+        .attr("text-anchor", "middle")
+        .attr("x", graphWidth / 2)
+        .attr("y", graphHeight - margins.top + 10);
+      graph.append("g")
+        .attr("class", "national")
+        .attr("fill", "lightblue")
+        .selectAll("rect")
+        .data(nationalCovidTotal)
+        .join("rect")
+        .attr("x", ({ date }) => timeScale(date))
+        .attr("y", d => currentYScale(d[dataNationalAttr]))
+        .attr("width", timeScale.bandwidth())
+        .attr("height", d => currentYScale(0) - currentYScale(d[dataNationalAttr]));
+
+      const label = map.append("rect")
+        .attr("fill", "lightgrey")
+        .attr("class", "label rect")
+        .attr("opacity", 0.4)
+        .attr("x", 700)
+        .attr("y", 0)
+        .attr("width", 150)
+        .attr("height", 100);
+      const txt = map.append("text")
+        .attr("fill", "black")
+        .attr("class", "label text")
+        .attr("text-anchor", "left")
+        .attr("alignment-baseline", "hanging")
+        .attr("x", 710)
+        .attr("y", 20)
+        .text("Current Month: ");
+      const txt2 = map.append("text")
+        .attr("fill", "black")
+        .attr("class", "label text2")
+        .attr("text-anchor", "left")
+        .attr("alignment-baseline", "hanging")
+        .attr("x", 710)
+        .attr("y", 40)
+        .text("change");
+      const txt4 = map.append("text")
+        .attr("fill", "black")
+        .attr("class", "label text4")
+        .attr("text-anchor", "left")
+        .attr("alignment-baseline", "hanging")
+        .attr("x", 710)
+        .attr("y", 60)
+        .text("Current Year:");
+      const txt3 = map.append("text")
+        .attr("fill", "black")
+        .attr("class", "label text3")
+        .attr("text-anchor", "left")
+        .attr("alignment-baseline", "hanging")
+        .attr("x", 710)
+        .attr("y", 80)
+        .text("yr");
+
+      const getColor = (data, scale, month, id, attr) => {
+        return data[month][id] !== undefined ? scale(data[month][id][attr]) : "lightgrey";
+      };
+
+      const updateMonth = (month) => {
+        month = parseInt(month);
+
+        map.select("text.text2")
+          .text(months[(month + 2) % months.length]);
+
+        if (month <= 9) {
+          map.select("text.text3")
+            .text("2020");
+        } else {
+          map.select("text.text3")
+            .text("2021");
+        }
+      };
+
+      const updateBoundary = () => {
+        map.selectAll("path.county")
+          .classed("is-hidden", () => showState);
+        map.select("path.county-boundary")
+          .classed("is-hidden", () => showState);
+        map.selectAll("path.state")
+          .classed("is-hidden", () => !showState);
+        map.select("path.state-boundary")
+          .raise();
+      };
+
+      const updateMapInst = (month) => {
+        let colorScale = showState ? statesScale : countiesScale;
+        d3.select("#colorLegend").html("");
+        drawLegend(d3.select("#colorLegend"), colorScale);
+
+        map.selectAll("path.county")
+          .style("fill", ({ id }) => getColor(countiesCovid, countiesScale, month, id, dataCountiesAttr));
+        map.selectAll("path.state")
+          .style("fill", ({ id }) => getColor(statesCovid, statesScale, month, id, dataStatesAttr));
+
+        updateBoundary();
+        updateMonth(month);
+      };
+
+      const updateMapTransition = (month) => {
+        let colorScale = showState ? statesScale : countiesScale;
+        d3.select("#colorLegend").html("");
+        drawLegend(d3.select("#colorLegend"), colorScale);
+
+        map.selectAll("path.county")
+          .transition()
+          .duration(frameDuration)
+          .ease(d3.easeLinear)
+          .style("fill", ({ id }) => getColor(countiesCovid, countiesScale, month, id, dataCountiesAttr));
+        map.selectAll("path.state")
+          .transition()
+          .duration(frameDuration)
+          .ease(d3.easeLinear)
+          .style("fill", ({ id }) => getColor(statesCovid, statesScale, month, id, dataStatesAttr));
+
+        updateBoundary();
+        updateMonth(month);
+      };
+
+      const stopAnimation = () => {
+        if (timer && !isAnimating) timer.stop();
+        animateBtn.text("Play");
+      };
+
+      const updateAnimation = () => {
+        let animateMonth = parseInt(slider.property("value"));
+
+        if (animateMonth >= slider.property("max")) {
+          updateMapInst(animateMonth);
+          isAnimating = false;
+          stopAnimation();
+        } else {
+          updateMapTransition(animateMonth);
+          slider.property("value", animateMonth + 1);
+          updateMonth(animateMonth);
+        }
+      }
+
+      const step = (elapsed) => {
+        if (elapsed - previousElapsed >= frameDuration || previousElapsed === 0) {
+          updateAnimation();
+          previousElapsed = elapsed;
+        }
+      };
+
+      const animate = () => {
+        stopAnimation();
+
+        if (isAnimating && (parseInt(slider.property("value")) >= parseInt(slider.property("max")))) {
+          animateBtn.text("Stop");
+          slider.property("value", 0);
+          updateMapInst(slider.property("value"));
+          previousElapsed = 0;
+          timer = d3.timer(step);
+        } else if (isAnimating) {
+          animateBtn.text("Stop");
+          previousElapsed = 0;
+          timer = d3.timer(step);
+        };
+      };
+
+      const switchView = () => {
+        switch (d3.select("#dataGenre option:checked").text()) {
+          case "Cases":
+            statesScale = statesCasesScale;
+            countiesScale = countiesCasesScale;
+            currentYScale = yScale(nationalCases);
+            currentLeftAxis = leftAxis(currentYScale);
+            dataNationalAttr = "cases";
+            dataStatesAttr = "cases";
+            dataCountiesAttr = "cases";
+            leftAxisLabel = "Total Cases";
+            break;
+          case "Deaths":
+            statesScale = statesDeathsScale;
+            countiesScale = countiesDeathsScale;
+            currentYScale = yScale(nationalDeaths);
+            dataNationalAttr = "deaths";
+            dataStatesAttr = "deaths";
+            dataCountiesAttr = "deaths";
+            leftAxisLabel = "Total Deaths";
+            break;
+          case "Vaccinations":
+            statesScale = statesVaccinationScale;
+            countiesScale = countiesVaccinationScale;
+            currentYScale = yScale([0, 1]);
+            currentLeftAxis = leftAxis(currentYScale);
+            dataNationalAttr = "series_complete_pop_pct";
+            dataStatesAttr = "series_complete_pop_pct";
+            dataCountiesAttr = "series_complete_pop_pct";
+            leftAxisLabel = "% Fully Vaccinated (12+)";
+            break;
+          default:
+            statesScale = statesCasesScale;
+            countiesScale = countiesCasesScale;
+            currentYScale = yScale(nationalCases);
+            currentLeftAxis = leftAxis(currentYScale);
+            dataNationalAttr = "cases";
+            dataStatesAttr = "cases";
+            dataCountiesAttr = "cases";
+            leftAxisLabel = "Total Cases";
+            break;
+        }
+      };
+
+      const resetLocalBars = () => {
+        focusedArea = null;
+        graph.select("g.local").remove();
+        updateMapInst(slider.property("value"));
+      }
+
+      const repaintNationalBars = () => {
+        graph.select("g.yAxis").remove();
+        graph.append("g")
+          .attr("class", "yAxis")
+          .attr("transform", `translate(${margins.left}, 0)`)
+          .call(currentLeftAxis);
+        graph.select("g.national")
+          .selectAll("rect")
+          .data(nationalCovidTotal)
+          .attr("y", d => currentYScale(d[dataNationalAttr]))
+          .attr("height", d => currentYScale(0) - currentYScale(d[dataNationalAttr]));
+      };
+
+      const resetBarGraph = () => {
+        resetLocalBars();
+        repaintNationalBars();
+        graph.select("text.yAxisLabel").remove();
+        let textElement = graph.append("text")
+          .text(leftAxisLabel)
+          .attr("class", "yAxisLabel")
+          .attr("transform", "rotate(-90)")
+          .attr("alignment-baseline", "middle");
+
+        if (leftAxisLabel == "% Fully Vaccinated (12+)") {
+          textElement.attr("x", -graphHeight / 2 - 8 * margins.top)
+            .attr("y", margins.left / 2);
+        } else {
+          textElement.attr("x", -graphHeight / 2 - 3 * margins.top)
+            .attr("y", margins.left / 4);
+        }
+      }
+
+      function click(e, d) {
+        const area = d3.select(this);
+
+        if (focusedArea === area.attr("id")) {
+          resetBarGraph();
+        } else if (!focusedArea || area !== null) {
+          resetBarGraph();
+          focusedArea = area.attr("id");
+
+          let localData = [];
+          let dataLocalAttr;
+
+          if (showState) {
+            for (let i = 0; i <= slider.property("max"); i++) {
+              localData.push({ ...statesCovid[i][focusedArea], date: i });
+            }
+            dataLocalAttr = dataStatesAttr;
+          } else {
+            for (let i = 0; i <= slider.property("max"); i++) {
+              localData.push({ ...statesCovid[i][focusedArea], date: i });
+            }
+            dataLocalAttr = dataCountiesAttr;
+          }
+
+          area.style("fill", "yellow");
+          graph.append("g")
+            .attr("class", "local")
+            .attr("fill", "lightcoral")
+            .attr("opacity", "0.5")
+            .selectAll("rect")
+            .data(localData)
+            .join("rect")
+            .attr("x", ({ date }) => timeScale(date))
+            .attr("y", d => currentYScale(d[dataLocalAttr]))
+            .attr("width", timeScale.bandwidth())
+            .attr("height", d => currentYScale(0) - currentYScale(d[dataLocalAttr]));
+        }
+      };
+
+      slider.property("value", 0);
+      selector.property("selectedIndex", 0);
+      updateMapInst(slider.property("value"));
+      stateViewBtn.on("click", showStateView);
+      countyViewBtn.on("click", showCountyView);
+      animateBtn.on("click", () => {
+        isAnimating = !isAnimating;
+        animate();
+      });
+      slider.on("change", () => {
+        isAnimating = false;
+        previousElapsed = 0;
+        stopAnimation();
+        resetBarGraph();
+        updateMapInst(slider.property("value"));
+      });
+      selector.on("change", () => {
+        switchView();
+        resetBarGraph();
+        updateMapInst(slider.property("value"));
+      });
+    };
+
+    makeMaps();
+
+    // Legend  
+    var linear = d3.scaleQuantize()
+      .domain([0, 5])
+      .range(d3.schemeBlues[9]);
+
+    var svgLegend = d3.select("svg#legend");
+
+    svgLegend.append("g")
+      .attr("class", "legend")
+      .attr("transform", "translate(20,20)");
+
+    var legend = d3.legendColor()
+      .shapeWidth(100)
+      .cells(10)
+      .orient("horizontal")
+      .scale(linear);
+
+    svgLegend.select(".legend")
+      .call(legend);
+    // --> Inspiration from: https://d3-legend.susielu.com/
+
+    const title = svgLegend.append("text")
+      .attr("fill", "black")
+      .attr("class", "legend text")
+      .attr("text-anchor", "left")
+      .attr("alignment-baseline", "hanging")
+      .attr("x", 20)
+      .attr("y", 0)
+      .text("COVID-19 Density (in millions)");
+
+  </script>
+</body>
+
+</html>
